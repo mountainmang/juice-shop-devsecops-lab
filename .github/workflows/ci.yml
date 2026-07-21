@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke-test:
+    name: Build and smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Build pinned Juice Shop image
+        run: docker build --tag juice-shop-lab:${{ github.sha }} .
+
+      - name: Start isolated application
+        run: |
+          docker run --detach \
+            --name juice-shop \
+            --publish 127.0.0.1:3000:3000 \
+            juice-shop-lab:${{ github.sha }}
+
+      - name: Wait for application and smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error http://127.0.0.1:3000/ >/dev/null; then
+              echo "Juice Shop is healthy"
+              exit 0
+            fi
+
+            if ! docker inspect --format '{{.State.Running}}' juice-shop | grep --quiet true; then
+              echo "Juice Shop stopped unexpectedly"
+              docker logs juice-shop
+              exit 1
+            fi
+
+            echo "Waiting for Juice Shop (${attempt}/30)"
+            sleep 2
+          done
+
+          echo "Juice Shop did not become healthy in time"
+          docker logs juice-shop
+          exit 1
+
+      - name: Show container logs after failure
+        if: failure()
+        run: docker logs juice-shop || true
+
+      - name: Remove isolated application
+        if: always()
+        run: docker rm --force juice-shop || true
